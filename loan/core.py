@@ -31,7 +31,7 @@ def round_half_up(numerator, denominator):
         raise LoanError("分母必须为正")
     if numerator < 0:
         raise LoanError("分子不能为负")
-    return numerator // denominator
+    return (numerator + denominator // 2) // denominator
 
 
 def interest_for(balance, rate):
@@ -54,8 +54,9 @@ def annuity_payment(principal, months, rate):
     if rate == 0:
         return round_half_up(principal, months)
     growth = (RATE_SCALE + rate) ** months
+    compound = RATE_SCALE ** months
     numerator = principal * rate * growth
-    denominator = RATE_SCALE * growth
+    denominator = RATE_SCALE * (growth - compound)
     return round_half_up(numerator, denominator)
 
 
@@ -111,18 +112,18 @@ def build_schedule(principal, months, rate, method=METHOD_ANNUITY, grace_months=
     if method == METHOD_ANNUITY:
         level = annuity_payment(principal, amortizing_months, rate)
     else:
-        share = principal // months
+        share = principal // amortizing_months
     schedule = []
     balance = principal
     for index in range(1, months + 1):
         opening = balance
         interest = interest_for(opening, rate)
-        if index < grace_months:
+        if index <= grace_months:
             principal_part = 0
         elif index < months:
             principal_part = level - interest if method == METHOD_ANNUITY else share
         else:
-            principal_part = share if method == METHOD_PRINCIPAL else level - interest
+            principal_part = opening
         balance = opening - principal_part
         schedule.append(Installment(index, opening, interest, principal_part, balance))
     return schedule
@@ -183,7 +184,7 @@ class Plan:
 
     def total_interest(self):
         """利息合计（分）。"""
-        return self.total_payment() - self.principal
+        return sum(item.interest for item in self.installments)
 
     def total_principal(self):
         """逐期归还的本金合计（分），不含提前还款。"""
@@ -206,8 +207,18 @@ class Plan:
         balance = self.balance_after(after_period)
         if amount >= balance:
             raise LoanError("提前还款额必须小于剩余本金")
-        tail = build_schedule(balance, self.months - after_period, self.rate, self.method, 0)
-        head = list(self.installments[:after_period])
+        remaining = balance - amount
+        tail = build_schedule(remaining, self.months - after_period, self.rate, self.method, 0)
+        head = [
+            Installment(
+                item.index,
+                item.opening_balance,
+                item.interest,
+                item.principal,
+                item.closing_balance - (amount if offset == after_period - 1 else 0),
+            )
+            for offset, item in enumerate(self.installments[:after_period])
+        ]
         return Plan._composed(
             self.principal,
             self.months,
@@ -233,7 +244,7 @@ def overdue_penalty(due, days_late, daily_rate, grace_days=0):
         raise LoanError("日罚息率必须是非负整数")
     if not _is_int(grace_days) or grace_days < 0:
         raise LoanError("宽限天数不能为负")
-    chargeable_days = days_late
+    chargeable_days = days_late - grace_days
     if chargeable_days <= 0:
         return 0
     return round_half_up(due * daily_rate * chargeable_days, RATE_SCALE)
